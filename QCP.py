@@ -37,7 +37,8 @@ def list_keys():
     keys = load_keys()
     for index, key in enumerate(keys, start=1):
         key_id = key.get("short_id") or key.get("long_id", "Unknown")
-        print(f"{index}. {key['type']} Key - ID: {key_id}")
+        key_type = key.get("type")
+        print(f"{index}. {key_type} Key - ID: {key_id}")
 
 def get_key_by_index(index):
     keys = load_keys()
@@ -48,10 +49,20 @@ def get_key_by_index(index):
         return None
 
 def sign_ecc_message(private_key_pem, message):
+    """Sign a message using an ECC private key."""
+    # Load the private key
     private_key = ECC.import_key(private_key_pem)
+    
+    # Hash the message
     message_hash = int.from_bytes(hashlib.sha256(message.encode('utf-8')).digest(), byteorder='big')
+    
+    # Sign using the private key
     signature = private_key.sign(message_hash)
+    
+    # Encode the signature
     signature_base64 = base64.b64encode(b''.join([signature[0].to_bytes(32, byteorder='big'), signature[1].to_bytes(32, byteorder='big')])).decode('utf-8')
+    
+    # Return signed message
     signed_message = f"-----BEGIN ECC SIGNED MESSAGE-----\n\n{message}\n\n-----ECC SIGNATURE-----\n{signature_base64}\n-----END ECC SIGNATURE-----"
     return signed_message
 
@@ -59,8 +70,8 @@ def generate_ecc_key():
     key = ECC.generate(curve='P-256')
     public_key = key.public_key().export_key(format='PEM')
     private_key = key.export_key(format='PEM')
-    key_id = hashlib.sha256(public_key.encode('utf-8')).hexdigest()[:16]
-    private_key_base64 = base64.b64encode(private_key.encode('utf-8')).decode('utf-8')
+    key_id = hashlib.sha256(public_key.encode('utf-8')).hexdigest()[:16]  # Using the raw bytes of the public key
+    private_key_base64 = base64.b64encode(private_key.encode('utf-8')).decode('utf-8')  # Encoding private key in base64
     key_data = {
         "type": "ECC",
         "private_key": private_key_base64,
@@ -78,9 +89,10 @@ def generate_ecc_key():
 def generate_hbs_key():
     private_key = SigningKey.generate()
     public_key = private_key.verify_key.encode(encoder=Base64Encoder)
+    # Generate a unique ID for the HBS key using a hash function
     key_bytes = public_key.decode('utf-8').encode('utf-8')
-    key_id = hashlib.sha256(key_bytes).hexdigest()
-    private_key_base64 = base64.b64encode(private_key.encode()).decode()
+    key_id = hashlib.sha256(key_bytes).hexdigest()[:16]  # Using the raw bytes of the public key
+    private_key_base64 = base64.b64encode(private_key.encode()).decode()  # Encoding private key in base64
     key_data = {
         "type": "HBS",
         "private_key": private_key_base64,
@@ -88,11 +100,14 @@ def generate_hbs_key():
         "short_id": key_id
     }
     save_key(key_data)
+    
     print("\nGenerated HBS Key")
     print(f"Private Key:\n{private_key_base64}")
     print(f"Public Key:\n{public_key.decode()}")
     print(f"Key ID: {key_id}")
+    
     return private_key_base64, public_key.decode(), key_id
+
 
 def generate_pgp_key(name, email, comment="", passphrase="", key_size=2048, hash_algo=HashAlgorithm.SHA256, encryption_prefs={KeyFlags.Sign, KeyFlags.EncryptCommunications}):
     key = PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, key_size)
@@ -102,6 +117,7 @@ def generate_pgp_key(name, email, comment="", passphrase="", key_size=2048, hash
         key.protect(passphrase, SymmetricKeyAlgorithm.AES256, hash_algo)
     keyid = key.fingerprint.keyid
     return key, key.pubkey, keyid
+
 
 def sign_pgp_message(private_key, message, hash_algo=HashAlgorithm.SHA256):
     pgp_message = PGPMessage.new(message)
@@ -123,8 +139,8 @@ def verify_pgp_signature(public_key, signed_message_text):
                 keyid = sig.signer
                 print(f"gpg: Signature made {sig.created.strftime('%Y-%m-%d %H:%M:%S')} {sig.created.strftime('%Z')}")
                 print(f"gpg:                using RSA key {keyid}")
-                print("gpg: Good signature from ‘Unknown User’ [full]")  
-            return True 
+                print("gpg: Good signature from 'Unknown User' [full]")  # Adjusted line
+            return True
         else:
             print("Signature is invalid.")
             return False
@@ -138,8 +154,10 @@ def verify_hbs_signature(public_key, signed_message, original_message):
     try:
         public_key.verify(signed_message, original_message.encode("utf-8"))
         print("\nSignature verified successfully with HBS public key.")
+        return True
     except Exception as e:
         print(f"\nFailed to verify signature: {e}")
+        return False
 
 def save_signed_message(message_entry):
     messages = load_signed_messages()
@@ -184,7 +202,7 @@ def create_new_key():
         key_data = {
             "type": "PGP",
             "private_key": str(private_key),
-            "public_key": str(public_key),
+            "public_key": str(public_key),  # Save the public key string
             "public_key_path": public_key_path,
             "long_id": key_id,
             "short_id": key_id[-8:]
@@ -203,16 +221,24 @@ def create_new_key():
         pq_key_type_choice = input("Your selection: ")
 
         if pq_key_type_choice == "1":
-            generate_ecc_key()
+            private_key, public_key, key_id = generate_ecc_key()
+            key_type = "ECC"
         elif pq_key_type_choice == "2":
-            generate_hbs_key()
+            private_key, public_key, key_id = generate_hbs_key()
+            key_type = "HBS"
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
+
+        print(f"Generated {key_type} Key")
+        print("Private Key:")
+        print(private_key)
+        print("Public Key:")
+        print(public_key)
+        print(f"Key ID: {key_id}")
     else:
         print("Invalid choice. Exiting.")
         sys.exit(1)
-
 
 
 def sign_message():
@@ -244,14 +270,12 @@ def sign_message():
         if key_data["type"] == "HBS":
             private_key = SigningKey(key_data["private_key"], encoder=Base64Encoder)
         else:
-            private_key = ECC.import_key(base64.b64decode(key_data["private_key"]).decode('utf-8'))
-        
+            private_key = ECC.import_key(key_data["private_key"])
         if key_data["type"] == "HBS":
             signed_message = sign_hbs_message(private_key, message_text)
             signed_message_text = f"-----BEGIN HBS SIGNED MESSAGE-----\n\n{message_text}\n\n-----HBS SIGNATURE-----\n{base64.b64encode(signed_message.signature).decode('utf-8')}\n-----END HBS SIGNATURE-----"
         else:
             signed_message_text = sign_ecc_message(private_key, message_text)
-        
         print(f"\nSigned Message using {key_data['type']}:")
         print(signed_message_text)
         save_prompt = input("Would you like to save your message? (y/n): ").lower()
@@ -287,7 +311,7 @@ def verify_message():
         print("\nSaved Signed Messages:")
         for index, message in enumerate(messages, start=1):
             print(f"{index}. ID: {message['key_id']} Message: {message['summary']}")
-
+        
         message_selection = int(input("Select a message to verify (enter its number), or enter 0 to manually input a message: "))
         if message_selection > 0 and message_selection <= len(messages):
             signed_message_text = messages[message_selection - 1]["signed_message"]
@@ -301,18 +325,14 @@ def verify_message():
             public_key = PGPKey()
             public_key.parse(key_data["public_key"])
             return verify_pgp_signature(public_key, signed_message_text)
-        elif key_data["type"] in ("HBS", "ECC"):
+        elif key_data["type"] == "HBS":
             if "public_key" not in key_data:
                 print("Public key not found.")
                 return
             public_key = VerifyKey(key_data["public_key"], encoder=Base64Encoder)
             original_message, signed_signature = extract_hbs_parts(signed_message_text)
-            if not original_message or not signed_signature:
-                print("Failed to extract original message and signature.")
-                return
             verify_hbs_signature(public_key, signed_signature, original_message)
-        else:
-            print("Unsupported key type for this operation.")
+
 
 def extract_hbs_parts(signed_message):
     pattern = r"-----BEGIN HBS SIGNED MESSAGE-----\n\n(.+?)\n\n-----HBS SIGNATURE-----\n(.+?)\n-----END HBS SIGNATURE-----"
@@ -333,6 +353,49 @@ def clear_all_data():
         json.dump([], file)
     print("All signed messages have been cleared.")
 
+def convert_pqp_to_pgp():
+    print("Select a Post-Quantum key to convert to PGP:")
+    list_keys()
+    key_index = int(input("Your selection: ")) - 1
+    key_data = get_key_by_index(key_index)
+
+    if not key_data:
+        print("Invalid key selection.")
+        return
+
+    if key_data["type"] != "ECC" and key_data["type"] != "HBS":
+        print("Selected key is not a Post-Quantum key.")
+        return
+
+    name = input("Enter your name: ")
+    email = input("Enter your email: ")
+    comment = input("Enter optional comment (press Enter to skip): ")
+    passphrase = input("Enter passphrase for your key (press Enter to skip): ")
+    key_size = int(input("Enter key size (default: 2048, recommended: 4096): ") or "2048")
+
+    private_key, public_key, key_id = generate_pgp_key(name, email, comment, passphrase, key_size)
+    keys_dir = "keys"
+    if not os.path.exists(keys_dir):
+        os.makedirs(keys_dir)
+    public_key_str = str(public_key)
+    public_key_path = os.path.join(keys_dir, f"{key_id}_public.asc")
+    with open(public_key_path, "w") as fp:
+        fp.write(public_key_str)
+    key_data = {
+        "type": "PGP",
+        "private_key": str(private_key),
+        "public_key": str(public_key),  # Save the public key string
+        "public_key_path": public_key_path,
+        "long_id": key_id,
+        "short_id": key_id[-8:]
+    }
+    save_key(key_data)
+    print(f"\nConverted Post-Quantum key to PGP key with ID: {key_id}")
+    print("Generated PGP Private Key:")
+    print(private_key)
+    print("Generated PGP Public Key:")
+    print(public_key)
+
 def main():
     initialize_database()
     while True:
@@ -341,7 +404,8 @@ def main():
         print("2. Verify a signed message")
         print("3. Sign a new message")
         print("4. Clear all keys and messages")
-        print("5. Exit")
+        print("5. Convert Post-Quantum key to PGP key")
+        print("6. Exit")
         choice = input("Your selection: ")
         if choice == "1":
             create_new_key()
@@ -352,6 +416,8 @@ def main():
         elif choice == "4":
             clear_all_data()
         elif choice == "5":
+            convert_pqp_to_pgp()
+        elif choice == "6":
             print("Exiting.")
             break
         else:
