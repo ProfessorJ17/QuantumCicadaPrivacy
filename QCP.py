@@ -1,38 +1,43 @@
 import sys
 import json
+import base64
+import os
+import re
 import hashlib
-from pgpy import PGPKey, PGPUID
+from pgpy import PGPKey, PGPUID, PGPMessage
 from pgpy.constants import PubKeyAlgorithm, KeyFlags, HashAlgorithm
 from pgpy.errors import PGPError
 from Crypto.PublicKey import ECC
 from nacl.signing import SigningKey, VerifyKey
 from nacl.encoding import Base64Encoder
-import base64
-import os
-import re
+from pgpy.constants import SymmetricKeyAlgorithm, CompressionAlgorithm
 
-DATABASE_FILE = 'keys_database.json'
-SIGNED_MESSAGES_FILE = 'signed_messages.txt'
+DATABASE_FILE = "keys_database.json"
+SIGNED_MESSAGES_FILE = "signed_messages.json"
 
 def initialize_database():
     if not os.path.exists(DATABASE_FILE):
-        with open(DATABASE_FILE, 'w') as db:
+        with open(DATABASE_FILE, "w") as db:
+            json.dump([], db)
+    if not os.path.exists(SIGNED_MESSAGES_FILE):
+        with open(SIGNED_MESSAGES_FILE, "w") as db:
             json.dump([], db)
 
 def load_keys():
-    with open(DATABASE_FILE, 'r') as db:
+    with open(DATABASE_FILE, "r") as db:
         return json.load(db)
 
 def save_key(key_data):
     keys = load_keys()
     keys.append(key_data)
-    with open(DATABASE_FILE, 'w') as db:
+    with open(DATABASE_FILE, "w") as db:
         json.dump(keys, db)
 
 def list_keys():
     keys = load_keys()
     for index, key in enumerate(keys, start=1):
-        print(f"{index}. {key['type']} Key - ID: {key['short_id']}")
+        key_id = key.get("short_id") or key.get("long_id", "Unknown")
+        print(f"{index}. {key['type']} Key - ID: {key_id}")
 
 def get_key_by_index(index):
     keys = load_keys()
@@ -42,72 +47,115 @@ def get_key_by_index(index):
         print("Invalid selection.")
         return None
 
+def sign_ecc_message(private_key_pem, message):
+    private_key = ECC.import_key(private_key_pem)
+    message_hash = int.from_bytes(hashlib.sha256(message.encode('utf-8')).digest(), byteorder='big')
+    signature = private_key.sign(message_hash)
+    signature_base64 = base64.b64encode(b''.join([signature[0].to_bytes(32, byteorder='big'), signature[1].to_bytes(32, byteorder='big')])).decode('utf-8')
+    signed_message = f"-----BEGIN ECC SIGNED MESSAGE-----\n\n{message}\n\n-----ECC SIGNATURE-----\n{signature_base64}\n-----END ECC SIGNATURE-----"
+    return signed_message
+
 def generate_ecc_key():
     key = ECC.generate(curve='P-256')
-    public_key = key.public_key()
-    return key, public_key
+    public_key = key.public_key().export_key(format='PEM')
+    private_key = key.export_key(format='PEM')
+    key_id = hashlib.sha256(public_key.encode('utf-8')).hexdigest()[:16]
+    private_key_base64 = base64.b64encode(private_key.encode('utf-8')).decode('utf-8')
+    key_data = {
+        "type": "ECC",
+        "private_key": private_key_base64,
+        "public_key": public_key,
+        "short_id": key_id
+    }
+    save_key(key_data)
+    print("\nGenerated ECC Key")
+    print(f"Private Key:\n{private_key}")
+    print("Public Key:")
+    print(public_key)
+    print(f"Key ID: {key_id}")
+    return private_key_base64, public_key, key_id
 
-def generate_pgp_key(name, email, comment='', passphrase='', key_size=2048, hash_algo=HashAlgorithm.SHA256, encryption_prefs={KeyFlags.Sign, KeyFlags.EncryptCommunications}):
+def generate_hbs_key():
+    private_key = SigningKey.generate()
+    public_key = private_key.verify_key.encode(encoder=Base64Encoder)
+    key_bytes = public_key.decode('utf-8').encode('utf-8')
+    key_id = hashlib.sha256(key_bytes).hexdigest()
+    private_key_base64 = base64.b64encode(private_key.encode()).decode()
+    key_data = {
+        "type": "HBS",
+        "private_key": private_key_base64,
+        "public_key": public_key.decode(),
+        "short_id": key_id
+    }
+    save_key(key_data)
+    print("\nGenerated HBS Key")
+    print(f"Private Key:\n{private_key_base64}")
+    print(f"Public Key:\n{public_key.decode()}")
+    print(f"Key ID: {key_id}")
+    return private_key_base64, public_key.decode(), key_id
+
+def generate_pgp_key(name, email, comment="", passphrase="", key_size=2048, hash_algo=HashAlgorithm.SHA256, encryption_prefs={KeyFlags.Sign, KeyFlags.EncryptCommunications}):
     key = PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, key_size)
     uid = PGPUID.new(name, email, comment)
     key.add_uid(uid, usage=encryption_prefs, hashes=[hash_algo])
     if passphrase:
-        key.protect(passphrase, hash_algo)
+        key.protect(passphrase, SymmetricKeyAlgorithm.AES256, hash_algo)
     keyid = key.fingerprint.keyid
     return key, key.pubkey, keyid
 
-def generate_hbs_key():
-    private_key = SigningKey.generate()
-    public_key = private_key.verify_key
-    return private_key, public_key
-
 def sign_pgp_message(private_key, message, hash_algo=HashAlgorithm.SHA256):
-    signed_message = private_key.sign(message, hash_algo=hash_algo)
-    pgp_signed_message = f"-----BEGIN PGP SIGNED MESSAGE-----\nHash: {hash_algo.name}\n\n{message}\n\n{str(signed_message)}"
+    pgp_message = PGPMessage.new(message)
+    signed_message = private_key.sign(pgp_message, hash=hash_algo)
+    pgp_signed_message = f"-----BEGIN PGP SIGNED MESSAGE-----\nHash: {hash_algo.name}\n\n{message}\n" + str(signed_message)
     return pgp_signed_message
 
 def sign_hbs_message(private_key, message):
-    signed_message = private_key.sign(message.encode('utf-8'))
+    signed_message = private_key.sign(message.encode("utf-8"))
     return signed_message
 
-def verify_pgp_signature(public_key, signed_message):
+def verify_pgp_signature(public_key, signed_message_text):
     try:
-        verified = public_key.verify(signed_message)
-        if verified:
-            keyid = signed_message.signatures[0].signer
-            creation_time = signed_message.signatures[0].creation_time
-            signee = signed_message.signatures[0].signee
-            print(f"gpg: Signature made {creation_time.strftime('%Y-%m-%d %H:%M:%S')} {creation_time.strftime('%Z')}")
-            print(f"gpg:                using RSA key {keyid}")
-            print(f"gpg: Good signature from '{signee}' [full]")
-            return True
+        signed_message = PGPMessage.from_blob(signed_message_text)
+        verification_result = public_key.verify(signed_message)
+        if verification_result:
+            print("Signature is valid.")
+            for sig in signed_message.signatures:
+                keyid = sig.signer
+                print(f"gpg: Signature made {sig.created.strftime('%Y-%m-%d %H:%M:%S')} {sig.created.strftime('%Z')}")
+                print(f"gpg:                using RSA key {keyid}")
+                print("gpg: Good signature from ‘Unknown User’ [full]")  
+            return True 
         else:
             print("Signature is invalid.")
             return False
-    except Exception as e:
+    except PGPError as e:
         print(f"Verification failed: {e}")
-        return False
+    except Exception as e:
+        print(f"An unexpected error occurred during verification: {e}")
+    return False
 
 def verify_hbs_signature(public_key, signed_message, original_message):
     try:
-        signed_message_bytes = base64.b64decode(signed_message)
-        if len(signed_message_bytes) != 64:
-            raise ValueError("The signature must be exactly 64 bytes long")
-        public_key.verify(signed_message_bytes, original_message.encode('utf-8'))
+        public_key.verify(signed_message, original_message.encode("utf-8"))
         print("\nSignature verified successfully with HBS public key.")
     except Exception as e:
         print(f"\nFailed to verify signature: {e}")
 
+def save_signed_message(message_entry):
+    messages = load_signed_messages()
+    messages.append(message_entry)
+    with open(SIGNED_MESSAGES_FILE, "w") as db:
+        json.dump(messages, db)
+
+def load_signed_messages():
+    with open(SIGNED_MESSAGES_FILE, "r") as db:
+        return json.load(db)
+
 def extract_signature(signed_message_text):
-    # Define the pattern to match the entire signature block, including possible leading/trailing whitespace/newlines
-    signature_pattern = r'(?:\s*-----BEGIN PGP SIGNATURE-----[\s\S]*?\s*-----END PGP SIGNATURE-----\s*)'
-    
-    # Search for the signature block in the signed message text
+    signature_pattern = r"-----BEGIN PGP SIGNATURE-----\nHash: \w+\n\n(.+?)\n-----END PGP SIGNATURE-----"
     match = re.search(signature_pattern, signed_message_text, re.MULTILINE | re.DOTALL)
-    
     if match:
-        # Return the matched signature block
-        return match.group(0)
+        return match.group(1)
     else:
         print("Could not find the signature part in the signed message.")
         return None
@@ -124,24 +172,22 @@ def create_new_key():
     passphrase = input("Enter passphrase for your key (press Enter to skip): ")
     key_size = int(input("Enter key size (default: 2048, recommended: 4096): ") or "2048")
 
-    if key_type_choice == '1':
+    if key_type_choice == "1":
         private_key, public_key, key_id = generate_pgp_key(name, email, comment, passphrase, key_size)
-        # Check if the 'keys' directory exists, if not, create it
-        keys_dir = 'keys'
+        keys_dir = "keys"
         if not os.path.exists(keys_dir):
             os.makedirs(keys_dir)
-
-        # Serialize the public key to a string and write it to a file
         public_key_str = str(public_key)
-        public_key_path = os.path.join(keys_dir, f'{key_id}_public.asc')
-        with open(public_key_path, 'w') as fp:
+        public_key_path = os.path.join(keys_dir, f"{key_id}_public.asc")
+        with open(public_key_path, "w") as fp:
             fp.write(public_key_str)
         key_data = {
-            'type': 'PGP',
-            'private_key': str(private_key),
-            'public_key_path': public_key_path,  # Include the public key path
-            'long_id': key_id,
-            'short_id': key_id[-8:]
+            "type": "PGP",
+            "private_key": str(private_key),
+            "public_key": str(public_key),
+            "public_key_path": public_key_path,
+            "long_id": key_id,
+            "short_id": key_id[-8:]
         }
         save_key(key_data)
         print(f"Generated PGP Key ID (long): {key_id}")
@@ -149,10 +195,36 @@ def create_new_key():
         print("Generated PGP Private Key:")
         print(private_key)
         print("Generated PGP Public Key:")
-        print(open(public_key_path).read())
-    elif key_type_choice == '2':
-        # Similar logic for Post-Quantum keys, adjusting for different key types and saving mechanisms
-        pass
+        print(public_key)
+    elif key_type_choice == "2":
+        print("Select Post-Quantum key type:")
+        print("1. ECC")
+        print("2. HBS")
+        pq_key_type_choice = input("Your selection: ")
+
+        if pq_key_type_choice == "1":
+            private_key, public_key, key_id = generate_ecc_key()
+            key_type = "ECC"
+        elif pq_key_type_choice == "2":
+            private_key, public_key, key_id = generate_hbs_key()
+            key_type = "HBS"
+        else:
+            print("Invalid choice. Exiting.")
+            sys.exit(1)
+
+        key_data = {
+            "type": key_type,
+            "private_key": private_key,
+            "public_key": public_key,
+            "short_id": key_id
+        }
+        save_key(key_data)
+        print(f"Generated {key_type} Key")
+        print("Private Key:")
+        print(private_key)
+        print("Public Key:")
+        print(public_key)
+        print(f"Key ID: {key_id}")
     else:
         print("Invalid choice. Exiting.")
         sys.exit(1)
@@ -167,39 +239,46 @@ def sign_message():
         return
 
     message_text = input("Enter your message to sign: ")
-    if key_data['type'] == 'PGP':
+    if key_data["type"] == "PGP":
         private_key = PGPKey()
-        private_key.parse(key_data['private_key'])
+        private_key.parse(key_data["private_key"])
         signed_message = sign_pgp_message(private_key, message_text)
         print("\nSigned Message using PGP:")
         print(signed_message)
         save_prompt = input("Would you like to save your message? (y/n): ").lower()
-        if save_prompt == 'y':
-            message_summary = message_text[:20] + "..."  # Use the first 20 characters as a summary
+        if save_prompt == "y":
+            message_summary = message_text[:20] + "…"
             message_entry = {
-                "key_id": key_data['short_id'],
+                "key_id": key_data["short_id"],
                 "summary": message_summary,
                 "signed_message": signed_message
             }
-            with open(SIGNED_MESSAGES_FILE, 'a') as file:
-                file.write(json.dumps(message_entry) + "\n")
-    elif key_data['type'] in ['HBS', 'ECC']:
-        private_key = SigningKey(key_data['private_key'], encoder=Base64Encoder)
-        signed_message = sign_hbs_message(private_key, message_text)
-        signed_message_base64 = base64.b64encode(signed_message.signature).decode('utf-8')
-        custom_signed_message = f"-----BEGIN HBS SIGNED MESSAGE-----\n\n{message_text}\n\n-----BEGIN HBS SIGNATURE-----\n{signed_message_base64}\n-----END HBS SIGNATURE-----"
-        print("\nSigned Message using HBS:")
-        print(custom_signed_message)
+            save_signed_message(message_entry)
+    elif key_data["type"] == "HBS" or key_data["type"] == "ECC":
+        if key_data["type"] == "HBS":
+            private_key = SigningKey(key_data["private_key"], encoder=Base64Encoder)
+        else:
+            private_key = ECC.import_key(base64.b64decode(key_data["private_key"]).decode('utf-8'))
+        
+        if key_data["type"] == "HBS":
+            signed_message = sign_hbs_message(private_key, message_text)
+            signed_message_text = f"-----BEGIN HBS SIGNED MESSAGE-----\n\n{message_text}\n\n-----HBS SIGNATURE-----\n{base64.b64encode(signed_message.signature).decode('utf-8')}\n-----END HBS SIGNATURE-----"
+        else:
+            signed_message_text = sign_ecc_message(private_key, message_text)
+        
+        print(f"\nSigned Message using {key_data['type']}:")
+        print(signed_message_text)
         save_prompt = input("Would you like to save your message? (y/n): ").lower()
-        if save_prompt == 'y':
-            message_summary = message_text[:20] + "..."  # Use the first 20 characters as a summary
+        if save_prompt == "y":
+            message_summary = message_text[:20] + "…"
             message_entry = {
-                "key_id": key_data['short_id'],
+                "key_id": key_data["short_id"],
                 "summary": message_summary,
-                "signed_message": custom_signed_message
+                "signed_message": signed_message_text
             }
-            with open(SIGNED_MESSAGES_FILE, 'a') as file:
-                file.write(json.dumps(message_entry) + "\n")
+            save_signed_message(message_entry)
+    else:
+        print("Invalid key type.")
 
 def verify_message():
     print("Select a key to use for verification:")
@@ -208,71 +287,66 @@ def verify_message():
     key_data = get_key_by_index(key_index)
 
     if not key_data:
+        print("Invalid key selection.")
         return
 
-    # Attempt to load and display structured message entries
     try:
-        with open(SIGNED_MESSAGES_FILE, 'r') as file:
-            messages = [json.loads(line) for line in file]
+        with open(SIGNED_MESSAGES_FILE, "r") as file:
+            messages = json.load(file)
     except FileNotFoundError:
-        messages = []
+        print("No saved messages found.")
+        return
 
     if messages:
         print("\nSaved Signed Messages:")
         for index, message in enumerate(messages, start=1):
             print(f"{index}. ID: {message['key_id']} Message: {message['summary']}")
-        
+
         message_selection = int(input("Select a message to verify (enter its number), or enter 0 to manually input a message: "))
         if message_selection > 0 and message_selection <= len(messages):
-            signed_message_text = messages[message_selection - 1]['signed_message']
+            signed_message_text = messages[message_selection - 1]["signed_message"]
         else:
-            signed_message_text = input("Enter the signed message: ")
+            signed_message_text = input("Enter the full signed message: ")
 
-        # Extract the signature part from the signed message
-        signature_part = extract_signature(signed_message_text)
-
-        if signature_part is None:
-            print("Could not find the signature part in the signed message.")
-            return
-
-        # Proceed with verification
-        if key_data['type'] == 'PGP':
-            try:
-                public_key = PGPKey.from_file(key_data['public_key_path'])[0]
-                # Convert the signature part to bytes if necessary
-                signature_bytes = signature_part.encode('utf-8')
-                verify_result = public_key.verify(signature_bytes)
-                if verify_result:
-                    print("Verification successful.")
-                else:
-                    print("Signature is invalid.")
-            except PGPError as e:
-                print(f"An error occurred during verification: {e}")
-        elif key_data['type'] == 'HBS':
-            # Similar approach for HBS, assuming you have the necessary imports and setup
-            pass
-        elif key_data['type'] == 'ECC':
-            print("ECC signature verification is not implemented yet.")
+        if key_data["type"] == "PGP":
+            if "public_key" not in key_data:
+                print("Public key not found.")
+                return
+            public_key = PGPKey()
+            public_key.parse(key_data["public_key"])
+            return verify_pgp_signature(public_key, signed_message_text)
+        elif key_data["type"] in ("HBS", "ECC"):
+            if "public_key" not in key_data:
+                print("Public key not found.")
+                return
+            public_key = VerifyKey(key_data["public_key"], encoder=Base64Encoder)
+            original_message, signed_signature = extract_hbs_parts(signed_message_text)
+            if not original_message or not signed_signature:
+                print("Failed to extract original message and signature.")
+                return
+            verify_hbs_signature(public_key, signed_signature, original_message)
         else:
-            print("Invalid key type.")
-    else:
-        print("No saved messages found.")
+            print("Unsupported key type for this operation.")
 
+def extract_hbs_parts(signed_message):
+    pattern = r"-----BEGIN HBS SIGNED MESSAGE-----\n\n(.+?)\n\n-----HBS SIGNATURE-----\n(.+?)\n-----END HBS SIGNATURE-----"
+    match = re.search(pattern, signed_message, re.DOTALL)
+    if match:
+        original_message = match.group(1)
+        signed_signature = base64.b64decode(match.group(2))
+        return original_message, signed_signature
+    print("Failed to extract parts from HBS signed message.")
+    return None, None
 
 def clear_all_data():
-    # Clear keys database
-    with open(DATABASE_FILE, 'w') as db:
+    with open(DATABASE_FILE, "w") as db:
         json.dump([], db)
     print("All keys have been cleared.")
 
-    # Clear signed messages file
-    with open(SIGNED_MESSAGES_FILE, 'w') as file:
-        pass  # Writing nothing to the file effectively clears it
+    with open(SIGNED_MESSAGES_FILE, "w") as file:
+        json.dump([], file)
     print("All signed messages have been cleared.")
 
-
-
-# Update the main function to include the new menu options
 def main():
     initialize_database()
     while True:
@@ -283,15 +357,15 @@ def main():
         print("4. Clear all keys and messages")
         print("5. Exit")
         choice = input("Your selection: ")
-        if choice == '1':
+        if choice == "1":
             create_new_key()
-        elif choice == '2':
+        elif choice == "2":
             verify_message()
-        elif choice == '3':
+        elif choice == "3":
             sign_message()
-        elif choice == '4':
+        elif choice == "4":
             clear_all_data()
-        elif choice == '5':
+        elif choice == "5":
             print("Exiting.")
             break
         else:
