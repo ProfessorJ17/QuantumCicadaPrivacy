@@ -203,31 +203,17 @@ def create_new_key():
         pq_key_type_choice = input("Your selection: ")
 
         if pq_key_type_choice == "1":
-            private_key, public_key, key_id = generate_ecc_key()
-            key_type = "ECC"
+            generate_ecc_key()
         elif pq_key_type_choice == "2":
-            private_key, public_key, key_id = generate_hbs_key()
-            key_type = "HBS"
+            generate_hbs_key()
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
-
-        key_data = {
-            "type": key_type,
-            "private_key": private_key,
-            "public_key": public_key,
-            "short_id": key_id
-        }
-        save_key(key_data)
-        print(f"Generated {key_type} Key")
-        print("Private Key:")
-        print(private_key)
-        print("Public Key:")
-        print(public_key)
-        print(f"Key ID: {key_id}")
     else:
         print("Invalid choice. Exiting.")
         sys.exit(1)
+
+
 
 def sign_message():
     print("Select a key to use for signing:")
